@@ -10,11 +10,11 @@ export async function POST(request: Request) {
     const result = await syncYear(year);
     return Response.json(result);
   } catch (error) {
-    console.error("[sync] failed", error);
     const message = error instanceof Error ? error.message : "Sync failed";
     const frame = error instanceof Error
-      ? error.stack?.split("\n").map((line) => line.trim()).find((line) => line.includes("/lib/") || line.includes("/app/"))
+      ? error.stack?.split("\n").map((line) => line.trim()).find((line) => (line.includes("lib/") || line.includes("app/")) && !line.includes(".next/"))
       : undefined;
+    console.error(`[sync] failed: ${frame ? `${message} @ ${frame.replace(/^at\s+/, "")}` : message}`);
     return Response.json({ error: frame ? `${message} @ ${frame.replace(/^at\s+/, "")}` : message }, { status: 400 });
   }
 }

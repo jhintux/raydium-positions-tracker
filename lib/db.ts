@@ -10,7 +10,7 @@ type Row = Record<string, unknown>;
 type Cell = string | number | boolean | null;
 
 const globalForSql = globalThis as unknown as { ledgerSql?: Sql; ledgerSqlVersion?: number };
-const sqlClientVersion = 2;
+const sqlClientVersion = 3;
 
 export function getSql() {
   const url = process.env.DATABASE_URL?.trim() ?? "";
@@ -32,16 +32,8 @@ export function getSql() {
 function guardSql(sql: Sql): Sql {
   return new Proxy(sql, {
     apply(target, thisArg, args: unknown[]) {
-      const strings = args[0] as TemplateStringsArray | undefined;
-      if (strings && Array.isArray(strings.raw)) {
-        for (let index = 1; index < args.length; index += 1) {
-          if (args[index] === undefined) {
-            const before = strings[index - 1]?.replace(/\s+/g, " ").trim().slice(-70) ?? "";
-            const after = strings[index]?.replace(/\s+/g, " ").trim().slice(0, 50) ?? "";
-            throw new Error(`Undefined query value after \`${before}\` before \`${after}\``);
-          }
-        }
-      }
+      const problem = undefinedArgument(args);
+      if (problem) throw new Error(problem);
       return Reflect.apply(target, thisArg, args);
     },
     get(target, prop, receiver) {
@@ -59,6 +51,49 @@ function guardSql(sql: Sql): Sql {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function undefinedArgument(args: unknown[]): string | null {
+  const strings = args[0] as TemplateStringsArray | undefined;
+  if (strings && Array.isArray(strings.raw)) {
+    for (let index = 1; index < args.length; index += 1) {
+      const value = args[index];
+      if (value === undefined) {
+        const before = strings[index - 1]?.replace(/\s+/g, " ").trim().slice(-70) ?? "";
+        const after = strings[index]?.replace(/\s+/g, " ").trim().slice(0, 50) ?? "";
+        return `Undefined query value after \`${before}\` before \`${after}\``;
+      }
+      const nested = helperProblem(value, strings[index - 1] ?? "");
+      if (nested) return nested;
+    }
+    return null;
+  }
+  return helperProblem({ first: args[0], rest: args.slice(1) }, "");
+}
+
+function helperProblem(value: unknown, before: string): string | null {
+  if (!value || typeof value !== "object" || !("first" in value) || !("rest" in value)) return null;
+  const first = value.first;
+  const rest = value.rest;
+  const columns = Array.isArray(rest) ? rest.flat().filter((item): item is string => typeof item === "string") : [];
+  const rows = Array.isArray(first) ? first : [first];
+  const records = rows.filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && !Array.isArray(row));
+  if (records.length === 0) return null;
+  const sqlBefore = before.replace(/\s+/g, " ").trim().slice(-48);
+  if (/\bvalues$/i.test(sqlBefore) && Array.isArray(first) && !Array.isArray(first[0])) {
+    const column = columns[0] ?? Object.keys(records[0])[0] ?? "column";
+    return `Undefined query value: values() read "${column}" on the row array. Use insert into table \${sql(rows, columns)}.`;
+  }
+  for (const row of records) {
+    const names = columns.length ? columns : Object.keys(row);
+    for (const column of names) {
+      if (row[column] === undefined) {
+        const id = row.signature ?? row.nft_mint ?? row.id ?? "";
+        return `Undefined query value for ${column}${id ? ` (${String(id)})` : ""}.`;
+      }
+    }
+  }
+  return null;
 }
 
 function integer(value: unknown) {
@@ -317,32 +352,27 @@ export async function replaceDerived(input: {
       tick_upper: event.tickUpper,
     }));
     await insertChunks(eventRows, Object.keys(eventRows[0] ?? {}), async (slice) => {
-      await tx`
-        insert into events (
-          signature, slot, tx_index, event_index, block_time, nft_mint, pool_id, kind, liquidity,
-          amount0, amount1, fee0, fee1, sqrt_price_x64, mint0, mint1, tick_lower, tick_upper
-        ) values ${tx(
-          slice,
-          "signature",
-          "slot",
-          "tx_index",
-          "event_index",
-          "block_time",
-          "nft_mint",
-          "pool_id",
-          "kind",
-          "liquidity",
-          "amount0",
-          "amount1",
-          "fee0",
-          "fee1",
-          "sqrt_price_x64",
-          "mint0",
-          "mint1",
-          "tick_lower",
-          "tick_upper",
-        )}
-      `;
+      await tx`insert into events ${tx(
+        slice,
+        "signature",
+        "slot",
+        "tx_index",
+        "event_index",
+        "block_time",
+        "nft_mint",
+        "pool_id",
+        "kind",
+        "liquidity",
+        "amount0",
+        "amount1",
+        "fee0",
+        "fee1",
+        "sqrt_price_x64",
+        "mint0",
+        "mint1",
+        "tick_lower",
+        "tick_upper",
+      )}`;
     });
     const lotRows = input.lots.map((lot) => ({
       id: lot.id,
@@ -360,11 +390,7 @@ export async function replaceDerived(input: {
       signature: lot.signature,
     }));
     await insertChunks(lotRows, Object.keys(lotRows[0] ?? {}), async (slice) => {
-      await tx`
-        insert into lots (
-          id, nft_mint, mint, kind, amount, remaining, cost, cost_remaining, block_time, slot, tx_index, event_index, signature
-        ) values ${tx(slice, "id", "nft_mint", "mint", "kind", "amount", "remaining", "cost", "cost_remaining", "block_time", "slot", "tx_index", "event_index", "signature")}
-      `;
+      await tx`insert into lots ${tx(slice, "id", "nft_mint", "mint", "kind", "amount", "remaining", "cost", "cost_remaining", "block_time", "slot", "tx_index", "event_index", "signature")}`;
     });
     const saleRows = input.sales.map((sale) => ({
       id: sale.id,
@@ -378,10 +404,7 @@ export async function replaceDerived(input: {
       router: sale.router,
     }));
     await insertChunks(saleRows, Object.keys(saleRows[0] ?? {}), async (slice) => {
-      await tx`
-        insert into sales (id, signature, block_time, slot, tx_index, mint, amount, usdc, router)
-        values ${tx(slice, "id", "signature", "block_time", "slot", "tx_index", "mint", "amount", "usdc", "router")}
-      `;
+      await tx`insert into sales ${tx(slice, "id", "signature", "block_time", "slot", "tx_index", "mint", "amount", "usdc", "router")}`;
     });
     const matchRows = input.matches.map((match) => ({
       sale_id: match.saleId,
@@ -396,10 +419,7 @@ export async function replaceDerived(input: {
       signature: match.signature,
     }));
     await insertChunks(matchRows, Object.keys(matchRows[0] ?? {}), async (slice) => {
-      await tx`
-        insert into sale_matches (sale_id, lot_id, nft_mint, mint, lot_kind, amount, usdc, cost, block_time, signature)
-        values ${tx(slice, "sale_id", "lot_id", "nft_mint", "mint", "lot_kind", "amount", "usdc", "cost", "block_time", "signature")}
-      `;
+      await tx`insert into sale_matches ${tx(slice, "sale_id", "lot_id", "nft_mint", "mint", "lot_kind", "amount", "usdc", "cost", "block_time", "signature")}`;
     });
     const cashRows = input.cashFlows.map((cash) => ({
       nft_mint: cash.nftMint,
@@ -412,10 +432,7 @@ export async function replaceDerived(input: {
       cost: text(cash.cost),
     }));
     await insertChunks(cashRows, Object.keys(cashRows[0] ?? {}), async (slice) => {
-      await tx`
-        insert into cash_flows (nft_mint, signature, block_time, slot, tx_index, kind, amount, cost)
-        values ${tx(slice, "nft_mint", "signature", "block_time", "slot", "tx_index", "kind", "amount", "cost")}
-      `;
+      await tx`insert into cash_flows ${tx(slice, "nft_mint", "signature", "block_time", "slot", "tx_index", "kind", "amount", "cost")}`;
     });
     const now = Date.now();
     for (const position of input.positions) {
@@ -569,7 +586,7 @@ export async function positionCosts(positions: BuiltPosition[]) {
     await tx`delete from position_costs`;
     const rows = positions.map((position) => ({ nft_mint: position.nftMint, cost: text(position.cost) }));
     await insertChunks(rows, ["nft_mint", "cost"], async (slice) => {
-      await tx`insert into position_costs (nft_mint, cost) values ${tx(slice, "nft_mint", "cost")}`;
+      await tx`insert into position_costs ${tx(slice, "nft_mint", "cost")}`;
     });
   });
 }
