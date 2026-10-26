@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    agentUpgrade: "security",
+  },
   // ngrok (and similar tunnels) are a different host than localhost, so the
   // dev HMR WebSocket is cross-origin and gets blocked unless listed here.
   allowedDevOrigins: [
