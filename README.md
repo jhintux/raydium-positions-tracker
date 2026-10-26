@@ -1,36 +1,23 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Raydium ledger
 
-## Getting Started
-
-First, run the development server:
+Ledger for one wallet’s Raydium concentrated-liquidity positions. History is fetched through a Solana RPC proxy and stored in Supabase.
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Copy `.env.example` to `.env.local` and set:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `SOLANA_RPC_URL` — server-only proxy URL. The Helius key stays on that worker.
+- `DATABASE_URL` — Supabase transaction-pooler URI (port 6543).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Apply the schema and copy the local SQLite ledger (this does not re-download history):
 
-## Learn More
+```bash
+npm run import:sqlite
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+Open the app, enter the wallet if it is not already saved, then open the current month. A later sync of the current year asks only for transactions newer than the saved block time. Opening an earlier year loads only that year.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`data/tracker.db` stays local and is not committed. The import copies the wallet and the ledger rows. It does not copy the Helius key stored in that file.
