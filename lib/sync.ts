@@ -33,14 +33,17 @@ export async function syncYear(year: number) {
     return { year, fetched: 0, stored: existing.txCount, message: `${year} is already saved.` };
   }
 
+  console.info(`[sync] ${year} starting`, { newestStored: existing?.newestBlockTime ?? null });
   const rows = await fetchYear(settings.wallet, year, existing?.newestBlockTime ?? null);
+  console.info(`[sync] ${year} fetched ${rows.length} transactions`);
   let newest = existing?.newestBlockTime ?? null;
   for (const row of rows) {
     const signature = row.signature ?? row.transaction?.signatures?.[0];
     if (!signature || row.blockTime == null || row.meta?.err) continue;
+    if (row.slot == null) console.error("[sync] transaction is missing slot", signature);
     await upsertTransaction({
       signature,
-      slot: row.slot,
+      slot: row.slot ?? 0,
       txIndex: row.transactionIndex ?? 0,
       blockTime: row.blockTime,
       raw: JSON.stringify(row),
@@ -118,7 +121,8 @@ async function rebuild(wallet: string) {
     await savePools(live.pools.map((pool) => mergePool(pool.id, pool, names.get(pool.id), pools.get(pool.id))));
     await markMissingClosed(live.heldMints);
     liveNote = `${live.pools.length.toLocaleString("en-US")} open pool prices refreshed.`;
-  } catch {
+  } catch (error) {
+    console.error("[sync] live positions failed", error);
     liveNote = "History was saved, but live position accounts could not be read.";
   }
   return liveNote;
@@ -151,7 +155,7 @@ export async function refreshPricesIfStale() {
     const names = await fetchPoolNames(live.pools.map((pool) => pool.id));
     await savePools(live.pools.map((pool) => mergePool(pool.id, pool, names.get(pool.id), stale.get(pool.id))));
     await markMissingClosed(live.heldMints);
-  } catch {
-    return;
+  } catch (error) {
+    console.error("[sync] stale price refresh failed", error);
   }
 }

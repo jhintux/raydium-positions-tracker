@@ -41,7 +41,7 @@ export function SyncButton({ year, label }: { year: number; label?: string }) {
       >
         {working ? `Syncing ${year}…` : (label ?? `Sync ${year}`)}
       </button>
-      {message ? <p className={failed ? "max-w-md text-sm text-loss" : "max-w-md text-sm text-muted"}>{message}</p> : null}
+      {message ? <p className={failed ? "max-w-3xl break-words text-sm text-loss" : "max-w-3xl break-words text-sm text-muted"}>{message}</p> : null}
     </div>
   );
 }

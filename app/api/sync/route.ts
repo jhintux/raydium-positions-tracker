@@ -10,7 +10,11 @@ export async function POST(request: Request) {
     const result = await syncYear(year);
     return Response.json(result);
   } catch (error) {
+    console.error("[sync] failed", error);
     const message = error instanceof Error ? error.message : "Sync failed";
-    return Response.json({ error: message }, { status: 400 });
+    const frame = error instanceof Error
+      ? error.stack?.split("\n").map((line) => line.trim()).find((line) => line.includes("/lib/") || line.includes("/app/"))
+      : undefined;
+    return Response.json({ error: frame ? `${message} @ ${frame.replace(/^at\s+/, "")}` : message }, { status: 400 });
   }
 }

@@ -9,22 +9,56 @@ type Tx = postgres.TransactionSql;
 type Row = Record<string, unknown>;
 type Cell = string | number | boolean | null;
 
-const globalForSql = globalThis as unknown as { ledgerSql?: Sql };
+const globalForSql = globalThis as unknown as { ledgerSql?: Sql; ledgerSqlVersion?: number };
+const sqlClientVersion = 2;
 
 export function getSql() {
   const url = process.env.DATABASE_URL?.trim() ?? "";
   if (!url) throw new Error("DATABASE_URL is not set.");
-  if (!globalForSql.ledgerSql) {
-    globalForSql.ledgerSql = postgres(url, {
+  if (!globalForSql.ledgerSql || globalForSql.ledgerSqlVersion !== sqlClientVersion) {
+    globalForSql.ledgerSql = guardSql(postgres(url, {
       prepare: false,
       fetch_types: false,
       max: 1,
       idle_timeout: 20,
       connect_timeout: 10,
       ssl: { rejectUnauthorized: false },
-    });
+    }));
+    globalForSql.ledgerSqlVersion = sqlClientVersion;
   }
   return globalForSql.ledgerSql;
+}
+
+function guardSql(sql: Sql): Sql {
+  return new Proxy(sql, {
+    apply(target, thisArg, args: unknown[]) {
+      const strings = args[0] as TemplateStringsArray | undefined;
+      if (strings && Array.isArray(strings.raw)) {
+        for (let index = 1; index < args.length; index += 1) {
+          if (args[index] === undefined) {
+            const before = strings[index - 1]?.replace(/\s+/g, " ").trim().slice(-70) ?? "";
+            const after = strings[index]?.replace(/\s+/g, " ").trim().slice(0, 50) ?? "";
+            throw new Error(`Undefined query value after \`${before}\` before \`${after}\``);
+          }
+        }
+      }
+      return Reflect.apply(target, thisArg, args);
+    },
+    get(target, prop, receiver) {
+      if (prop === "begin") {
+        return (...args: unknown[]) => {
+          const last = args.at(-1);
+          if (typeof last === "function") {
+            const callback = last as (tx: Sql) => unknown;
+            args[args.length - 1] = (tx: Sql) => callback(guardSql(tx));
+          }
+          return Reflect.apply(target.begin, target, args);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 function integer(value: unknown) {
@@ -36,9 +70,53 @@ function requiredInteger(value: unknown) {
   return Number(value);
 }
 
+function integerText(value: unknown) {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isInteger(value)) return String(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return value.trim();
+  return null;
+}
+
 function big(value: unknown) {
   if (value == null || value === "") return null;
-  return BigInt(String(value));
+  const text = integerText(value);
+  if (text == null) {
+    console.error("[ledger] ignored non-integer", value === undefined ? "undefined" : String(value).slice(0, 80));
+    return null;
+  }
+  return BigInt(text);
+}
+
+type SqlRows = Row[] & { columns?: { name: string }[] };
+
+function readCell(row: Row, column: string, columns?: { name: string }[]) {
+  if (column in row && row[column] !== undefined) return row[column];
+  const index = columns?.findIndex((item) => item.name === column) ?? -1;
+  const byIndex = index >= 0 ? (row as unknown as unknown[])[index] : undefined;
+  if (byIndex !== undefined) {
+    console.error("[ledger] column missing by name; read it by position", { column, index, keys: Object.keys(row) });
+    return byIndex;
+  }
+  return row[column];
+}
+
+function requiredBig(value: unknown, where: string, row: Row) {
+  const text = integerText(value);
+  if (text != null) return BigInt(text);
+  const preview: Record<string, string> = {};
+  for (const [key, cell] of Object.entries(row)) {
+    const shown = cell === undefined ? "undefined" : cell === null ? "null" : String(cell);
+    preview[key] = shown.length > 48 ? `${shown.slice(0, 48)}…` : shown;
+  }
+  let host = "unknown";
+  try {
+    host = new URL(process.env.DATABASE_URL ?? "").host;
+  } catch {
+    host = "unparsed";
+  }
+  console.error("[ledger] cannot read integer", { where, host, value: value === undefined ? "undefined" : value, keys: Object.keys(row), preview });
+  const shown = value === undefined ? "undefined" : JSON.stringify(value);
+  throw new Error(`Cannot read ${where} (${shown}). Row keys: ${Object.keys(row).join(", ") || "(none)"}`);
 }
 
 function text(value: bigint | null) {
@@ -50,8 +128,11 @@ async function insertChunks(rows: Record<string, Cell>[], columns: string[], wri
   for (let offset = 0; offset < rows.length; offset += size) {
     const slice = rows.slice(offset, offset + size);
     if (slice.length === 0) continue;
-    if (slice.some((row) => columns.some((column) => !(column in row)))) {
-      throw new Error("Insert row is missing a column.");
+    for (const row of slice) {
+      for (const column of columns) {
+        if (!(column in row)) throw new Error(`Insert row is missing ${column}.`);
+        if (row[column] === undefined) throw new Error(`Undefined value for ${column}.`);
+      }
     }
     await write(slice);
   }
@@ -193,7 +274,7 @@ export async function loadPools() {
       decimals1: integer(row.decimals1),
       symbol0: row.symbol0 == null ? null : String(row.symbol0),
       symbol1: row.symbol1 == null ? null : String(row.symbol1),
-      sqrtPriceX64: row.sqrt_price_x64 == null ? null : BigInt(String(row.sqrt_price_x64)),
+      sqrtPriceX64: big(row.sqrt_price_x64),
       tickCurrent: integer(row.tick_current),
     });
   }
@@ -378,61 +459,77 @@ export type PositionRecord = {
 
 export async function loadFacts() {
   const sql = getSql();
-  const events: ParsedEvent[] = (await sql<Row[]>`select * from events order by block_time, slot, tx_index, event_index`).map((row) => ({
-    signature: String(row.signature),
-    slot: requiredInteger(row.slot),
-    txIndex: requiredInteger(row.tx_index),
-    eventIndex: requiredInteger(row.event_index),
-    blockTime: requiredInteger(row.block_time),
-    nftMint: String(row.nft_mint),
-    poolId: row.pool_id == null ? null : String(row.pool_id),
-    kind: String(row.kind) as ParsedEvent["kind"],
-    liquidity: BigInt(String(row.liquidity)),
-    amount0: BigInt(String(row.amount0)),
-    amount1: BigInt(String(row.amount1)),
-    fee0: BigInt(String(row.fee0)),
-    fee1: BigInt(String(row.fee1)),
-    sqrtPriceX64: big(row.sqrt_price_x64),
-    mint0: row.mint0 == null ? null : String(row.mint0),
-    mint1: row.mint1 == null ? null : String(row.mint1),
-    tickLower: integer(row.tick_lower),
-    tickUpper: integer(row.tick_upper),
-  }));
-  const lots: Lot[] = (await sql<Row[]>`select * from lots`).map((row) => ({
-    id: requiredInteger(row.id),
-    nftMint: String(row.nft_mint),
-    mint: String(row.mint),
-    kind: String(row.kind) as Lot["kind"],
-    amount: BigInt(String(row.amount)),
-    remaining: BigInt(String(row.remaining)),
-    cost: big(row.cost),
-    costRemaining: big(row.cost_remaining),
-    blockTime: requiredInteger(row.block_time),
-    slot: requiredInteger(row.slot),
-    txIndex: requiredInteger(row.tx_index),
-    eventIndex: requiredInteger(row.event_index),
-    signature: String(row.signature),
-  }));
-  const matches: Match[] = (await sql<Row[]>`select * from sale_matches`).map((row) => ({
-    saleId: requiredInteger(row.sale_id),
-    lotId: requiredInteger(row.lot_id),
-    nftMint: String(row.nft_mint),
-    mint: String(row.mint),
-    lotKind: String(row.lot_kind) as Match["lotKind"],
-    amount: BigInt(String(row.amount)),
-    usdc: BigInt(String(row.usdc)),
-    cost: big(row.cost),
-    blockTime: requiredInteger(row.block_time),
-    signature: String(row.signature),
-  }));
-  const cashFlows: CashFlow[] = (await sql<Row[]>`select * from cash_flows`).map((row) => ({
+  const eventRows = await sql<Row[]>`select * from events order by block_time, slot, tx_index, event_index` as SqlRows;
+  const events: ParsedEvent[] = eventRows.map((row) => {
+    const at = `events ${String(row.signature ?? "?")}#${String(row.event_index ?? "?")}`;
+    const value = (column: string) => requiredBig(readCell(row, column, eventRows.columns), `${at}.${column}`, row);
+    return {
+      signature: String(row.signature),
+      slot: requiredInteger(row.slot),
+      txIndex: requiredInteger(row.tx_index),
+      eventIndex: requiredInteger(row.event_index),
+      blockTime: requiredInteger(row.block_time),
+      nftMint: String(row.nft_mint),
+      poolId: row.pool_id == null ? null : String(row.pool_id),
+      kind: String(row.kind) as ParsedEvent["kind"],
+      liquidity: value("liquidity"),
+      amount0: value("amount0"),
+      amount1: value("amount1"),
+      fee0: value("fee0"),
+      fee1: value("fee1"),
+      sqrtPriceX64: big(row.sqrt_price_x64),
+      mint0: row.mint0 == null ? null : String(row.mint0),
+      mint1: row.mint1 == null ? null : String(row.mint1),
+      tickLower: integer(row.tick_lower),
+      tickUpper: integer(row.tick_upper),
+    };
+  });
+  const lotRows = await sql<Row[]>`select * from lots` as SqlRows;
+  const lots: Lot[] = lotRows.map((row) => {
+    const at = `lots ${String(row.id ?? "?")}`;
+    const value = (column: string) => requiredBig(readCell(row, column, lotRows.columns), `${at}.${column}`, row);
+    return {
+      id: requiredInteger(row.id),
+      nftMint: String(row.nft_mint),
+      mint: String(row.mint),
+      kind: String(row.kind) as Lot["kind"],
+      amount: value("amount"),
+      remaining: value("remaining"),
+      cost: big(row.cost),
+      costRemaining: big(row.cost_remaining),
+      blockTime: requiredInteger(row.block_time),
+      slot: requiredInteger(row.slot),
+      txIndex: requiredInteger(row.tx_index),
+      eventIndex: requiredInteger(row.event_index),
+      signature: String(row.signature),
+    };
+  });
+  const matchRows = await sql<Row[]>`select * from sale_matches` as SqlRows;
+  const matches: Match[] = matchRows.map((row) => {
+    const at = `sale_matches ${String(row.id ?? "?")}`;
+    const value = (column: string) => requiredBig(readCell(row, column, matchRows.columns), `${at}.${column}`, row);
+    return {
+      saleId: requiredInteger(row.sale_id),
+      lotId: requiredInteger(row.lot_id),
+      nftMint: String(row.nft_mint),
+      mint: String(row.mint),
+      lotKind: String(row.lot_kind) as Match["lotKind"],
+      amount: value("amount"),
+      usdc: value("usdc"),
+      cost: big(row.cost),
+      blockTime: requiredInteger(row.block_time),
+      signature: String(row.signature),
+    };
+  });
+  const cashRows = await sql<Row[]>`select * from cash_flows` as SqlRows;
+  const cashFlows: CashFlow[] = cashRows.map((row) => ({
     nftMint: String(row.nft_mint),
     signature: String(row.signature),
     blockTime: requiredInteger(row.block_time),
     slot: requiredInteger(row.slot),
     txIndex: requiredInteger(row.tx_index),
     kind: String(row.kind) as CashFlow["kind"],
-    amount: BigInt(String(row.amount)),
+    amount: requiredBig(readCell(row, "amount", cashRows.columns), `cash_flows ${String(row.id ?? "?")}.amount`, row),
     cost: big(row.cost),
   }));
   const sales = (await sql<Row[]>`select * from sales`).map((row) => ({
@@ -442,7 +539,10 @@ export async function loadFacts() {
     mint: String(row.mint),
   }));
   const positions = new Map<string, PositionRecord>();
-  for (const row of await sql<Row[]>`select * from positions`) {
+  const positionRows = await sql<Row[]>`select * from positions` as SqlRows;
+  for (const row of positionRows) {
+    const liquidity = readCell(row, "liquidity", positionRows.columns);
+    if (liquidity == null) console.error("[ledger] position liquidity missing", String(row.nft_mint ?? ""));
     positions.set(String(row.nft_mint), {
       nftMint: String(row.nft_mint),
       poolId: row.pool_id == null ? null : String(row.pool_id),
@@ -451,7 +551,7 @@ export async function loadFacts() {
       openedAt: integer(row.opened_at),
       closedAt: integer(row.closed_at),
       status: String(row.status) === "closed" ? "closed" : "open",
-      liquidity: BigInt(String(row.liquidity ?? "0")),
+      liquidity: requiredBig(liquidity ?? "0", `positions ${String(row.nft_mint ?? "?")}.liquidity`, row),
       amount0: big(row.amount0),
       amount1: big(row.amount1),
       feeOwed0: big(row.fee_owed0) ?? 0n,
