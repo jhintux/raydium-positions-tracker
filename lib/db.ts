@@ -61,7 +61,7 @@ export type Settings = { wallet: string };
 
 export async function getSettings(): Promise<Settings> {
   const sql = getSql();
-  const [row] = await sql<Row[]>`select wallet from settings where id = 1`;
+  const [row] = await sql<Row[]>`select wallet from settings where id = ${1}`;
   return { wallet: String(row?.wallet ?? "") };
 }
 
@@ -106,7 +106,7 @@ function syncYear(row: Row): SyncYear {
 
 export async function listSyncYears(): Promise<SyncYear[]> {
   const sql = getSql();
-  const rows = await sql<Row[]>`select year, newest_block_time, tx_count, updated_at from sync_years order by year desc`;
+  const rows = await sql<Row[]>`select year, newest_block_time, tx_count, updated_at from sync_years order by year desc`.simple();
   return rows.map(syncYear);
 }
 
