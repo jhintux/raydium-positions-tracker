@@ -2,14 +2,15 @@ import { connection } from "next/server";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
+import { GlobalPnl } from "@/components/global-pnl";
 import { LoadYear } from "@/components/load-year";
-import { Money } from "@/components/money";
+import { MonthBoard, type PositionWire } from "@/components/month-board";
 import { MonthNav } from "@/components/month-nav";
-import { PositionCard } from "@/components/position-card";
 import { SyncButton } from "@/components/sync-button";
-import { getSettings, getSyncYear, loadCosts, loadFacts } from "@/lib/db";
-import { presentMonth } from "@/lib/present";
-import { refreshPricesIfStale } from "@/lib/sync";
+import type { PositionView } from "@/lib/present";
+import { getSettings, getSyncYear, loadCosts, loadFacts, loadWalletPnl } from "@/lib/db";
+import { openedLabel, presentMonth } from "@/lib/present";
+import { refreshPricesInBackground } from "@/lib/sync";
 
 export const instant = false;
 
@@ -38,9 +39,11 @@ async function MonthBody({ params }: { params: Promise<{ year: string; month: st
       </p>
     );
   }
+  const walletPnl = await loadWalletPnl();
   if (year > now.getFullYear() || (year === now.getFullYear() && month > now.getMonth() + 1)) {
     return (
       <>
+        <GlobalPnl profitMicro={walletPnl.profitMicro} unknownPositions={walletPnl.unknownPositions} />
         <MonthNav year={year} month={month} now={now} />
         <p>That month has not started.</p>
       </>
@@ -50,6 +53,7 @@ async function MonthBody({ params }: { params: Promise<{ year: string; month: st
   if (!saved) {
     return (
       <>
+        <GlobalPnl profitMicro={walletPnl.profitMicro} unknownPositions={walletPnl.unknownPositions} />
         <MonthNav year={year} month={month} now={now} />
         {year === now.getFullYear() ? (
           <section className="rounded-2xl border border-line bg-card p-6">
@@ -68,9 +72,9 @@ async function MonthBody({ params }: { params: Promise<{ year: string; month: st
     );
   }
 
-  await refreshPricesIfStale();
   const facts = await loadFacts();
   const costs = await loadCosts();
+  refreshPricesInBackground();
   for (const [nft, cost] of costs) {
     const position = facts.positions.get(nft);
     if (position) position.cost = cost;
@@ -79,6 +83,7 @@ async function MonthBody({ params }: { params: Promise<{ year: string; month: st
 
   return (
     <>
+      <GlobalPnl profitMicro={walletPnl.profitMicro} unknownPositions={walletPnl.unknownPositions} />
       <MonthNav year={year} month={month} now={now} />
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
@@ -90,33 +95,41 @@ async function MonthBody({ params }: { params: Promise<{ year: string; month: st
         </div>
         {year === now.getFullYear() ? <SyncButton year={year} label="Sync new transactions" /> : null}
       </div>
-      <section className="mb-6 grid gap-3 sm:grid-cols-4">
-        <Summary label="Realized this month" value={<Money micro={view.realizedMicro} signed />} />
-        <Summary label="USDC fees" value={<Money micro={view.feeMicro} />} />
-        <Summary label="Fee sales" value={<Money micro={view.feeSaleMicro} />} />
-        <Summary label="Principal result" value={<Money micro={view.principalMicro} signed />} />
-      </section>
-      <p className="mb-4 max-w-3xl text-sm text-muted">
-        Realized profit is USDC fees collected, USDC received for fee tokens sold, and the result of principal withdrawn or sold, all dated in this month. Open positions still show their unrealized value on the row. When two positions pay the same stock, the oldest unsold fee is treated as sold first.
-      </p>
-      {view.positions.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-line p-6 text-muted">No Raydium CLMM activity in {view.title}.</p>
-      ) : (
-        <div className="flex flex-col gap-4">
-          {view.positions.map((position) => (
-            <PositionCard key={position.nftMint} position={position} />
-          ))}
-        </div>
-      )}
+      <MonthBoard
+        title={view.title}
+        positions={view.positions.map(wirePosition)}
+        summary={{
+          realizedMicro: wireMicro(view.realizedMicro),
+          feeMicro: view.feeMicro.toString(),
+          feeSaleMicro: view.feeSaleMicro.toString(),
+          principalMicro: wireMicro(view.principalMicro),
+        }}
+      />
     </>
   );
 }
 
-function Summary({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-line bg-card p-4">
-      <p className="text-sm text-muted">{label}</p>
-      <p className="mt-1 text-2xl">{value}</p>
-    </div>
-  );
+function wireMicro(value: bigint | null) {
+  return value == null ? null : value.toString();
+}
+
+function wirePosition(position: PositionView): PositionWire {
+  return {
+    nftMint: position.nftMint,
+    pair: position.pair,
+    status: position.status,
+    inRange: position.inRange,
+    opened: openedLabel(position),
+    daysLabel: position.daysLabel,
+    deposited: position.deposited,
+    costMicro: wireMicro(position.costMicro),
+    current: position.current,
+    currentValueMicro: wireMicro(position.currentValueMicro),
+    withdrawn: position.withdrawn,
+    feesCollected: position.feesCollected,
+    feesUnsold: position.feesUnsold,
+    feesSold: position.feesSold,
+    feeSaleMicro: position.feeSaleMicro.toString(),
+    profitMicro: wireMicro(position.profitMicro),
+  };
 }

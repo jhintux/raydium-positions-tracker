@@ -80,9 +80,7 @@ export function presentMonth(facts: Facts, year: number, month: number, now = ne
       if (position.status === "open") ids.add(position.nftMint);
     }
   }
-  const positions = [...ids]
-    .map((nft) => presentPosition(facts, nft, now))
-    .sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
+  const positions = [...ids].map((nft) => presentPosition(facts, nft, now)).sort(comparePositions);
   return {
     year,
     month,
@@ -253,6 +251,15 @@ function timeline(facts: Facts, nft: string, pool: PoolMeta | null): TimelineIte
     });
   }
   return items.sort((a, b) => a.time - b.time).map((item) => ({ ...item, detail: `${formatTimestamp(item.time)}. ${item.detail}` }));
+}
+
+export function comparePositions(
+  a: { status: "open" | "closed"; openedAt: number | null },
+  b: { status: "open" | "closed"; openedAt: number | null },
+) {
+  if (a.status !== b.status) return a.status === "open" ? -1 : 1;
+  if (a.openedAt == null || b.openedAt == null) return a.openedAt == null ? (b.openedAt == null ? 0 : 1) : -1;
+  return b.openedAt - a.openedAt;
 }
 
 export function openedLabel(position: PositionView) {

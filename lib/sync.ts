@@ -142,6 +142,15 @@ function emptyPool(id: string): PoolMeta {
   };
 }
 
+let pricesRefresh: Promise<void> | null = null;
+
+export function refreshPricesInBackground() {
+  if (pricesRefresh) return;
+  pricesRefresh = refreshPricesIfStale().finally(() => {
+    pricesRefresh = null;
+  });
+}
+
 export async function refreshPricesIfStale() {
   const settings = await getSettings();
   if (!settings.wallet || !process.env.SOLANA_RPC_URL?.trim()) return;
@@ -151,11 +160,27 @@ export async function refreshPricesIfStale() {
   if (fresh === open) return;
   const stale = await loadPools();
   try {
-    const live = await refreshOpenPositions(settings.wallet);
-    const names = await fetchPoolNames(live.pools.map((pool) => pool.id));
+    const live = await withTimeout(refreshOpenPositions(settings.wallet), 20_000, "Live position read timed out.");
+    const names = await withTimeout(fetchPoolNames(live.pools.map((pool) => pool.id)), 20_000, "Pool name read timed out.");
     await savePools(live.pools.map((pool) => mergePool(pool.id, pool, names.get(pool.id), stale.get(pool.id))));
     await markMissingClosed(live.heldMints);
   } catch (error) {
     console.error("[sync] stale price refresh failed", error);
   }
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

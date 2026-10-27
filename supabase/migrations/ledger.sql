@@ -163,3 +163,163 @@ alter table sales enable row level security;
 alter table sale_matches enable row level security;
 alter table cash_flows enable row level security;
 alter table position_costs enable row level security;
+
+create or replace function ledger_usdc_micro(
+  mint text,
+  raw text,
+  mint0 text,
+  mint1 text,
+  decimals0 integer,
+  decimals1 integer,
+  sqrt_price text
+) returns numeric
+language sql
+stable
+as $$
+select case
+  when raw is null or btrim(raw) !~ '^-?[0-9]+$' then null
+  when btrim(raw)::numeric = 0 then 0
+  when mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' then round(btrim(raw)::numeric)
+  when sqrt_price is null or btrim(sqrt_price) !~ '^[0-9]+$' then null
+  when mint0 is null or mint1 is null or decimals0 is null or decimals1 is null then null
+  when mint is distinct from mint0 and mint is distinct from mint1 then null
+  when mint0 <> 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' and mint1 <> 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' then null
+  when power(btrim(sqrt_price)::numeric / power(2::numeric, 64), 2) * power(10::numeric, decimals0 - decimals1) <= 0 then null
+  when mint = mint0 and mint1 = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' then round(
+    (btrim(raw)::numeric / power(10::numeric, decimals0))
+    * power(btrim(sqrt_price)::numeric / power(2::numeric, 64), 2)
+    * power(10::numeric, decimals0 - decimals1)
+    * 1000000
+  )
+  when mint = mint1 and mint0 = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' then round(
+    (btrim(raw)::numeric / power(10::numeric, decimals1))
+    * 1000000
+    / (power(btrim(sqrt_price)::numeric / power(2::numeric, 64), 2) * power(10::numeric, decimals0 - decimals1))
+  )
+  else null
+end
+$$;
+
+create or replace view wallet_position_pnl
+with (security_invoker = true) as
+with nfts as (
+  select nft_mint from positions
+  union
+  select nft_mint from events
+  union
+  select nft_mint from cash_flows
+  union
+  select nft_mint from sale_matches
+  union
+  select nft_mint from lots
+  union
+  select nft_mint from position_costs
+),
+base as (
+  select
+    n.nft_mint,
+    coalesce(p.pool_id, (
+      select e.pool_id
+      from events e
+      where e.nft_mint = n.nft_mint and e.pool_id is not null
+      order by e.block_time, e.slot, e.tx_index, e.event_index
+      limit 1
+    )) as pool_id,
+    coalesce(p.status, case
+      when exists (select 1 from events e where e.nft_mint = n.nft_mint and e.kind = 'close') then 'closed'
+      else 'open'
+    end) as status,
+    p.amount0,
+    p.amount1,
+    coalesce(p.fee_owed0, '0') as fee_owed0,
+    coalesce(p.fee_owed1, '0') as fee_owed1,
+    nullif(btrim(c.cost), '') as cost
+  from nfts n
+  left join positions p on p.nft_mint = n.nft_mint
+  left join position_costs c on c.nft_mint = n.nft_mint
+),
+joined as (
+  select
+    b.nft_mint,
+    b.status,
+    b.amount0,
+    b.amount1,
+    b.fee_owed0,
+    b.fee_owed1,
+    b.cost,
+    o.id as pool_row,
+    o.mint0,
+    o.mint1,
+    o.decimals0,
+    o.decimals1,
+    o.sqrt_price_x64
+  from base b
+  left join pools o on o.id = b.pool_id
+),
+legs as (
+  select j.nft_mint, 'current0'::text as bucket,
+    ledger_usdc_micro(j.mint0, j.amount0, j.mint0, j.mint1, j.decimals0, j.decimals1, j.sqrt_price_x64) as micro
+  from joined j
+  where j.status = 'open'
+  union all
+  select j.nft_mint, 'current1',
+    ledger_usdc_micro(j.mint1, j.amount1, j.mint0, j.mint1, j.decimals0, j.decimals1, j.sqrt_price_x64)
+  from joined j
+  where j.status = 'open'
+  union all
+  select j.nft_mint, 'fee_owed0',
+    ledger_usdc_micro(j.mint0, j.fee_owed0, j.mint0, j.mint1, j.decimals0, j.decimals1, j.sqrt_price_x64)
+  from joined j
+  where j.pool_row is not null
+  union all
+  select j.nft_mint, 'fee_owed1',
+    ledger_usdc_micro(j.mint1, j.fee_owed1, j.mint0, j.mint1, j.decimals0, j.decimals1, j.sqrt_price_x64)
+  from joined j
+  where j.pool_row is not null
+  union all
+  select l.nft_mint,
+    case when l.kind = 'fee' then 'fee_lot' else 'principal_lot' end,
+    ledger_usdc_micro(l.mint, l.remaining, j.mint0, j.mint1, j.decimals0, j.decimals1, j.sqrt_price_x64)
+  from lots l
+  join joined j on j.nft_mint = l.nft_mint
+  where l.kind in ('fee', 'principal')
+)
+select
+  j.nft_mint,
+  j.status,
+  case
+    when j.cost is null or j.cost !~ '^-?[0-9]+$' then null
+    when j.status = 'open' and (j.mint0 is null or j.mint1 is null or j.amount0 is null or j.amount1 is null) then null
+    when j.status = 'open' and (
+      (select l.micro from legs l where l.nft_mint = j.nft_mint and l.bucket = 'current0') is null
+      or (select l.micro from legs l where l.nft_mint = j.nft_mint and l.bucket = 'current1') is null
+    ) then null
+    when j.pool_row is null and exists (select 1 from lots l where l.nft_mint = j.nft_mint and l.kind = 'fee') then null
+    when j.pool_row is null and exists (select 1 from lots l where l.nft_mint = j.nft_mint and l.kind = 'principal') then null
+    when exists (select 1 from legs l where l.nft_mint = j.nft_mint and l.micro is null) then null
+    else round(
+      coalesce((select sum(f.amount::numeric) from cash_flows f where f.nft_mint = j.nft_mint and f.amount ~ '^-?[0-9]+$'), 0)
+      + coalesce((select sum(m.usdc::numeric) from sale_matches m where m.nft_mint = j.nft_mint and m.usdc ~ '^-?[0-9]+$'), 0)
+      + case
+          when j.status = 'open' then
+            coalesce((select l.micro from legs l where l.nft_mint = j.nft_mint and l.bucket = 'current0'), 0)
+            + coalesce((select l.micro from legs l where l.nft_mint = j.nft_mint and l.bucket = 'current1'), 0)
+          else 0
+        end
+      + coalesce((select sum(l.micro) from legs l where l.nft_mint = j.nft_mint and l.bucket in ('fee_owed0', 'fee_owed1', 'fee_lot', 'principal_lot')), 0)
+      - j.cost::numeric
+    )
+  end as profit_micro
+from joined j;
+
+create or replace view wallet_global_pnl
+with (security_invoker = true) as
+select
+  case when count(profit_micro) = 0 then null else sum(profit_micro)::bigint end as profit_micro,
+  count(*) filter (where profit_micro is null)::integer as unknown_positions,
+  count(*)::integer as positions
+from wallet_position_pnl;
+
+revoke all on function ledger_usdc_micro(text, text, text, text, integer, integer, text) from public, anon, authenticated;
+revoke all on table wallet_position_pnl from public, anon, authenticated;
+revoke all on table wallet_global_pnl from public, anon, authenticated;

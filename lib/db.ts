@@ -10,18 +10,20 @@ type Row = Record<string, unknown>;
 type Cell = string | number | boolean | null;
 
 const globalForSql = globalThis as unknown as { ledgerSql?: Sql; ledgerSqlVersion?: number };
-const sqlClientVersion = 3;
+const sqlClientVersion = 4;
 
 export function getSql() {
   const url = process.env.DATABASE_URL?.trim() ?? "";
   if (!url) throw new Error("DATABASE_URL is not set.");
   if (!globalForSql.ledgerSql || globalForSql.ledgerSqlVersion !== sqlClientVersion) {
+    if (globalForSql.ledgerSql) void globalForSql.ledgerSql.end({ timeout: 1 });
     globalForSql.ledgerSql = guardSql(postgres(url, {
       prepare: false,
       fetch_types: false,
-      max: 1,
+      max: 4,
       idle_timeout: 20,
       connect_timeout: 10,
+      connection: { statement_timeout: 15_000 },
       ssl: { rejectUnauthorized: false },
     }));
     globalForSql.ledgerSqlVersion = sqlClientVersion;
@@ -174,6 +176,19 @@ async function insertChunks(rows: Record<string, Cell>[], columns: string[], wri
 }
 
 export type Settings = { wallet: string };
+
+export async function loadWalletPnl() {
+  const sql = getSql();
+  const [row] = await sql<Row[]>`
+    select profit_micro::text as profit_micro, unknown_positions::int as unknown_positions, positions::int as positions
+    from wallet_global_pnl
+  `;
+  return {
+    profitMicro: big(row?.profit_micro),
+    unknownPositions: Number(row?.unknown_positions ?? 0),
+    positions: Number(row?.positions ?? 0),
+  };
+}
 
 export async function getSettings(): Promise<Settings> {
   const sql = getSql();

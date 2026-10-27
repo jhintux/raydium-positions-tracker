@@ -1,10 +1,27 @@
 import Link from "next/link";
 import { Money } from "@/components/money";
 import { formatUsdc } from "@/lib/format";
-import type { PositionView } from "@/lib/present";
-import { openedLabel } from "@/lib/present";
 
-export function PositionCard({ position }: { position: PositionView }) {
+export type CardPosition = {
+  nftMint: string;
+  pair: string;
+  status: "open" | "closed";
+  inRange: boolean | null;
+  opened: string;
+  daysLabel: string;
+  deposited: string;
+  costMicro: bigint | null;
+  current: string | null;
+  currentValueMicro: bigint | null;
+  withdrawn: string | null;
+  feesCollected: string;
+  feesUnsold: string;
+  feesSold: string;
+  feeSaleMicro: bigint;
+  profitMicro: bigint | null;
+};
+
+export function PositionCard({ position }: { position: CardPosition }) {
   return (
     <article className="rounded-2xl border border-line bg-card p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -13,7 +30,7 @@ export function PositionCard({ position }: { position: PositionView }) {
             {position.pair}
           </Link>
           <p className="mt-1 text-sm text-muted">
-            {openedLabel(position)} · {position.daysLabel}
+            {position.opened} · {position.daysLabel}
           </p>
         </div>
         <div className="flex gap-2 text-xs uppercase tracking-wide">
