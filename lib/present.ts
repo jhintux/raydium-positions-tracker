@@ -17,6 +17,8 @@ export type TimelineItem = {
 export type PositionView = {
   nftMint: string;
   poolId: string | null;
+  mint0: string | null;
+  mint1: string | null;
   pair: string;
   status: "open" | "closed";
   inRange: boolean | null;
@@ -129,6 +131,8 @@ export function presentPosition(facts: Facts, nft: string, now = new Date()): Po
   return {
     nftMint: nft,
     poolId,
+    mint0: pool?.mint0 ?? null,
+    mint1: pool?.mint1 ?? null,
     pair,
     status,
     inRange: status === "open" ? position?.inRange ?? null : null,

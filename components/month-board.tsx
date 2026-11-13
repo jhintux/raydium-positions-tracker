@@ -7,6 +7,9 @@ import { PositionCard, type CardPosition } from "@/components/position-card";
 export type PositionWire = {
   nftMint: string;
   pair: string;
+  poolId: string | null;
+  mint0: string | null;
+  mint1: string | null;
   status: "open" | "closed";
   inRange: boolean | null;
   opened: string;
@@ -41,10 +44,11 @@ type ProfitFilter = (typeof profitFilters)[number]["id"];
 export function MonthBoard({ positions, summary, title }: { positions: PositionWire[]; summary: SummaryWire; title: string }) {
   const [profit, setProfit] = useState<ProfitFilter>("all");
   const [minCost, setMinCost] = useState("");
+  const [query, setQuery] = useState("");
   const cards = useMemo(() => positions.map(hydrate), [positions]);
   const minCostMicro = dollarsToMicro(minCost);
-  const shown = cards.filter((position) => matches(position, profit, minCostMicro));
-  const filtering = profit !== "all" || minCost.trim() !== "";
+  const shown = cards.filter((position) => matches(position, profit, minCostMicro, query));
+  const filtering = profit !== "all" || minCost.trim() !== "" || query.trim() !== "";
 
   return (
     <>
@@ -85,6 +89,7 @@ export function MonthBoard({ positions, summary, title }: { positions: PositionW
               onClick={() => {
                 setProfit("all");
                 setMinCost("");
+                setQuery("");
               }}
               className="rounded-full bg-chip px-3 py-1 text-sm"
             >
@@ -95,6 +100,15 @@ export function MonthBoard({ positions, summary, title }: { positions: PositionW
             {shown.length.toLocaleString("en-US")} of {positions.length.toLocaleString("en-US")}
             {minCostMicro === "invalid" ? " · Enter a USDC amount" : ""}
           </p>
+          <label className="ml-auto text-sm text-muted">
+            Search
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="NVDA or address"
+              className="mt-2 block w-64 rounded-full border border-line bg-card px-3 py-1 text-ink"
+            />
+          </label>
         </div>
       ) : null}
       <section className="mb-6 grid gap-3 sm:grid-cols-4">
@@ -130,11 +144,18 @@ function Summary({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function matches(position: CardPosition, profit: ProfitFilter, minCostMicro: bigint | null | "invalid") {
+function matches(position: CardPosition, profit: ProfitFilter, minCostMicro: bigint | null | "invalid", query: string) {
   if (profit === "gain" && (position.profitMicro == null || position.profitMicro <= 0n)) return false;
   if (profit === "loss" && (position.profitMicro == null || position.profitMicro >= 0n)) return false;
   if (typeof minCostMicro === "bigint" && (position.costMicro == null || position.costMicro < minCostMicro)) return false;
-  return true;
+  return matchesQuery(position, query);
+}
+
+function matchesQuery(position: CardPosition, query: string) {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+  if (position.pair.toLowerCase().includes(trimmed.toLowerCase())) return true;
+  return [position.poolId, position.mint0, position.mint1].some((value) => value != null && (value.includes(trimmed) || trimmed.includes(value)));
 }
 
 function dollarsToMicro(value: string): bigint | null | "invalid" {
@@ -153,6 +174,9 @@ function hydrate(position: PositionWire): CardPosition {
   return {
     nftMint: position.nftMint,
     pair: position.pair,
+    poolId: position.poolId,
+    mint0: position.mint0,
+    mint1: position.mint1,
     status: position.status,
     inRange: position.inRange,
     opened: position.opened,

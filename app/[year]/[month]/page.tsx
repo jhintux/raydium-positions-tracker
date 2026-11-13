@@ -117,6 +117,9 @@ function wirePosition(position: PositionView): PositionWire {
   return {
     nftMint: position.nftMint,
     pair: position.pair,
+    poolId: position.poolId,
+    mint0: position.mint0,
+    mint1: position.mint1,
     status: position.status,
     inRange: position.inRange,
     opened: openedLabel(position),
